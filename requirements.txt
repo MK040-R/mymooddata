@@ -1,2 +1,0 @@
-python-telegram-bot[job-queue]==21.6
-matplotlib==3.9.2
