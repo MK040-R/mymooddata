@@ -129,7 +129,7 @@ test('settings commands', () => {
   assert.match(out[1], /4× a day at 09:00, 13:00, 17:00, 21:00/);
   assert.match(out[2], /4× a day at 07:00, 12:00, 17:00, 22:00/);
   assert.match(out[3], /must be 1, 2, 3 or 4/);
-  assert.match(out[4], /Give a timezone/);
+  assert.match(out[4], /Unknown timezone/);
   assert.match(out[5], /Europe\/Berlin/);
   e.msg('/stop'); e.tick(at('2026-10-10T06:00'));
   assert.strictEqual(e.tick(at('2026-10-11T07:00')).length, 0);
@@ -177,6 +177,61 @@ test('chart failure falls back to text, empty period', () => {
   const out = e.tick(at('2026-10-10T08:00'));
   assert.match(out.at(-1).body.text, /No check-ins answered/);
   assert.strictEqual(out.filter(o => o.method === 'sendPhoto').length, 0);
+});
+
+test('buttons: keyboard on /start, button text works, settings panel taps', () => {
+  const e = makeEnv(tz);
+  e.msg('/start');
+  let out = e.tick(at('2026-10-10T08:00'));
+  assert.strictEqual(out[0].body.reply_markup.keyboard[0][0].text, '📊 Week');
+  e.msg('📊 Week'); e.msg('hello there');
+  out = e.tick(at('2026-10-10T08:00'));
+  assert.strictEqual(out.length, 1); // the week report (empty), chit-chat ignored
+  assert.match(out[0].body.text, /Last 7 days/);
+
+  e.msg('⚙️ Settings');
+  out = e.tick(at('2026-10-10T08:00'));
+  const kb = out[0].body.reply_markup.inline_keyboard;
+  assert.deepStrictEqual(kb[0].map(b => b.text), ['1', '✓ 2', '3', '4']);
+  const tapAndRender = data => { e.tap(data); return e.tick(at('2026-10-10T08:00')); };
+  out = tapAndRender('s:n:3');
+  assert.strictEqual(out[0].body.text, 'Saved');
+  assert.strictEqual(out[1].method, 'editMessageText');
+  assert.match(out[1].body.text, /3× a day at 09:00, 15:00, 21:00/);
+  out = tapAndRender('s:first');
+  assert.match(out[1].body.text, /First check-in/);
+  out = tapAndRender('s:f:2'); // 07:00
+  assert.match(out[1].body.text, /07:00, 14:00, 21:00/);
+  out = tapAndRender('s:l:7'); // 23:00
+  assert.match(out[1].body.text, /07:00, 15:00, 23:00/);
+  out = tapAndRender('s:tz');
+  assert.match(out[1].body.reply_markup.inline_keyboard[0][0].text, /✓ 🇮🇳 India/);
+  out = tapAndRender('s:z:3');
+  assert.strictEqual(e.props.TZ, 'Europe/London');
+  out = tapAndRender('s:pause');
+  assert.strictEqual(e.props.ACTIVE, 'false');
+  assert.match(out[1].body.text, /paused/);
+  assert.strictEqual(e.tick(at('2026-10-11T09:00')).length, 0);
+  tapAndRender('s:resume');
+  assert.strictEqual(e.props.ACTIVE, 'true');
+  e.tap('s:n:9'); e.tap('s:f:99'); e.tap('s:z:-1');
+  e.tick(at('2026-10-10T08:00'));
+  assert.strictEqual(e.props.PER_DAY, '3');
+  e.ctx.handleSettings_({ id: 'q', data: 's:n:1', message: { chat: { id: 99 }, message_id: 1 } });
+  assert.strictEqual(e.props.PER_DAY, '3'); // strangers can't change settings
+  e.msg('/timezone');
+  out = e.tick(at('2026-10-10T08:00'));
+  assert.match(out[0].body.text, /Your timezone/);
+});
+
+test('upgrade notice is sent exactly once', () => {
+  const e = makeEnv(tz);
+  e.props.CHAT_ID = '42';
+  e.ctx.upgrade_(); e.ctx.upgrade_();
+  const notes = e.sent.filter(o => o.method === 'sendMessage');
+  assert.strictEqual(notes.length, 1);
+  assert.ok(notes[0].body.reply_markup.keyboard);
+  assert.strictEqual(e.sent.filter(o => o.method === 'setMyCommands').length, 1);
 });
 
 console.log(`\n${ok} passed`);

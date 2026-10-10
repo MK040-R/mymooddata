@@ -19,15 +19,27 @@ const DEFAULTS = { first: '09:00', last: '21:00', perDay: 2 };
 const LATE_LIMIT_MIN = 30;        // a check-in more than this late is skipped, not sent
 const REPORT_LATE_LIMIT_MIN = 360;
 
+const VERSION = 2; // bump when the menu/buttons change, so the bot re-sends them once
+
+// The always-visible buttons where the phone keyboard normally sits.
+const BTN = { week: '📊 Week', month: '📅 Month', year: '📈 Year', settings: '⚙️ Settings' };
+const MAIN_KEYBOARD = {
+  keyboard: [[{ text: BTN.week }, { text: BTN.month }, { text: BTN.year }], [{ text: BTN.settings }]],
+  resize_keyboard: true,
+  is_persistent: true,
+};
+const FIRST_CHOICES = ['05:00', '06:00', '07:00', '08:00', '09:00', '10:00', '11:00', '12:00'];
+const LAST_CHOICES = ['16:00', '17:00', '18:00', '19:00', '20:00', '21:00', '22:00', '23:00'];
+const TZ_CHOICES = [
+  ['🇮🇳 India', 'Asia/Kolkata'], ['🇦🇪 UAE', 'Asia/Dubai'], ['🇸🇬 Singapore', 'Asia/Singapore'],
+  ['🇬🇧 UK', 'Europe/London'], ['🇩🇪 Central Europe', 'Europe/Berlin'], ['🇺🇸 US East', 'America/New_York'],
+  ['🇺🇸 US West', 'America/Los_Angeles'], ['🇦🇺 Sydney', 'Australia/Sydney'],
+];
+
 const HELP = [
   'I ask “How are you feeling now?” a few times a day. Tap an answer, that\'s it.',
   '',
-  '/settings – current schedule',
-  '/settime 09:00 21:00 – first and last check-in',
-  '/frequency 2 – check-ins per day (1 to 4), evenly spaced',
-  '/timezone Asia/Kolkata – your timezone',
-  '/week /month /year – stats and chart',
-  '/stop – pause check-ins, /start resumes',
+  'Use the buttons below: 📊 📅 📈 for stats and a chart, ⚙️ to change the schedule.',
 ].join('\n');
 
 // ---------------------------------------------------------------- menu & setup
@@ -53,23 +65,23 @@ function connectBot() {
   props_().setProperty('TOKEN', token);
   logSheet_();
   tg_('deleteWebhook', {});
-  tg_('setMyCommands', {
-    commands: [
-      { command: 'week', description: 'Last 7 days' },
-      { command: 'month', description: 'Last 30 days' },
-      { command: 'year', description: 'Last 365 days' },
-      { command: 'settings', description: 'Current schedule' },
-      { command: 'settime', description: 'First and last check-in, e.g. 09:00 21:00' },
-      { command: 'frequency', description: 'Check-ins per day, 1 to 4' },
-      { command: 'timezone', description: 'e.g. Asia/Kolkata' },
-      { command: 'stop', description: 'Pause check-ins' },
-      { command: 'start', description: 'Start or resume' },
-    ],
-  });
+  setCommands_();
   removeTriggers_();
   ScriptApp.newTrigger('tick').timeBased().everyMinutes(1).create();
   ui.alert('Connected to @' + me.result.username + '.\n\nNow open Telegram, search for @' +
     me.result.username + ' and send /start.\n\nYou can close this tab. It keeps running on Google\'s side.');
+}
+
+function setCommands_() {
+  tg_('setMyCommands', {
+    commands: [
+      { command: 'settings', description: 'Schedule, timezone, pause' },
+      { command: 'week', description: 'Last 7 days' },
+      { command: 'month', description: 'Last 30 days' },
+      { command: 'year', description: 'Last 365 days' },
+      { command: 'start', description: 'Start, or bring the buttons back' },
+    ],
+  });
 }
 
 function disconnectBot() {
@@ -91,11 +103,22 @@ function tick() {
   if (!lock.tryLock(1000)) return;
   try {
     if (!props_().getProperty('TOKEN')) return;
+    upgrade_();
     processUpdates_();
     runSchedule_(new Date());
   } finally {
     lock.releaseLock();
   }
+}
+
+/** After new code is pasted in: refresh the menu and send the new buttons once. */
+function upgrade_() {
+  const p = props_();
+  if (Number(p.getProperty('VERSION') || 0) >= VERSION) return;
+  p.setProperty('VERSION', String(VERSION));
+  setCommands_();
+  const chatId = p.getProperty('CHAT_ID');
+  if (chatId) tg_('sendMessage', { chat_id: chatId, text: 'Updated: buttons are below. Tap ⚙️ Settings to change the schedule.', reply_markup: MAIN_KEYBOARD });
 }
 
 function processUpdates_() {
@@ -108,6 +131,7 @@ function processUpdates_() {
     p.setProperty('OFFSET', String(u.update_id + 1));
     try {
       if (u.message) handleMessage_(u.message);
+      else if (u.callback_query && String(u.callback_query.data).indexOf('s:') === 0) handleSettings_(u.callback_query);
       else if (u.callback_query) handleAnswer_(u.callback_query);
     } catch (e) {
       console.error(e);
@@ -155,7 +179,8 @@ function runSchedule_(now) {
 // ---------------------------------------------------------------- telegram handlers
 
 function handleMessage_(msg) {
-  const text = (msg.text || '').trim();
+  let text = (msg.text || '').trim();
+  Object.keys(BTN).forEach(k => { if (text === BTN[k]) text = '/' + k; });
   if (text.charAt(0) !== '/') return; // not a chat bot: plain text is ignored
   const parts = text.split(/\s+/);
   const cmd = parts[0].split('@')[0].toLowerCase();
@@ -181,43 +206,33 @@ function handleMessage_(msg) {
   switch (cmd) {
     case '/start':
       p.setProperty('ACTIVE', 'true');
-      send_(chatId, 'Mood tracker is on.\n' + describe_(settings_()) + '\n\n' + HELP);
+      tg_('sendMessage', { chat_id: chatId, text: 'Mood tracker is on.\n' + describe_(settings_()) + '\n\n' + HELP, reply_markup: MAIN_KEYBOARD });
       return;
     case '/stop':
       p.setProperty('ACTIVE', 'false');
-      send_(chatId, 'Paused. Your data is kept. /start to resume.');
+      send_(chatId, 'Paused. Your data is kept. ⚙️ Settings → Resume to restart.');
       return;
     case '/settings':
-      send_(chatId, describe_(s));
-      return;
-    case '/help':
-      send_(chatId, HELP);
+    case '/frequency':
+      if (cmd === '/frequency' && args.length) setPerDay_(chatId, args[0]);
+      else showPanel_(chatId, null, 'main');
       return;
     case '/settime':
+      if (!args.length) { showPanel_(chatId, null, 'main'); return; }
       if (args.length !== 2 || !isHhmm_(args[0]) || !isHhmm_(args[1])) {
-        send_(chatId, 'Give two times, e.g. /settime 09:00 21:00');
+        send_(chatId, 'Give two times, e.g. /settime 09:00 21:00, or use ⚙️ Settings.');
         return;
       }
       p.setProperties({ FIRST: pad_(args[0]), LAST: pad_(args[1]) });
       send_(chatId, 'Updated.\n' + describe_(settings_()));
       return;
-    case '/frequency': {
-      const n = Number(args[0]);
-      if (!(n >= 1 && n <= 4 && Math.floor(n) === n)) {
-        send_(chatId, 'Frequency must be 1, 2, 3 or 4, e.g. /frequency 2');
-        return;
-      }
-      p.setProperty('PER_DAY', String(n));
-      send_(chatId, 'Updated.\n' + describe_(settings_()));
-      return;
-    }
     case '/timezone':
-      if (!args[0] || !isTimezone_(args[0])) {
-        send_(chatId, 'Give a timezone like /timezone Asia/Kolkata or /timezone Europe/Berlin');
+      if (!args.length) { showPanel_(chatId, null, 'tz'); return; }
+      if (!isTimezone_(args[0])) {
+        send_(chatId, 'Unknown timezone. Use a name like Asia/Kolkata or Europe/Berlin, or pick one in ⚙️ Settings.');
         return;
       }
-      p.setProperty('TZ', args[0]);
-      SpreadsheetApp.getActive().setSpreadsheetTimeZone(args[0]); // so the log's timestamps match
+      setTimezone_(args[0]);
       send_(chatId, 'Updated.\n' + describe_(settings_()));
       return;
     case '/week':
@@ -229,8 +244,81 @@ function handleMessage_(msg) {
       return;
     }
     default:
-      send_(chatId, HELP);
+      tg_('sendMessage', { chat_id: chatId, text: HELP, reply_markup: MAIN_KEYBOARD });
   }
+}
+
+function setPerDay_(chatId, value) {
+  const n = Number(value);
+  if (!(n >= 1 && n <= 4 && Math.floor(n) === n)) {
+    send_(chatId, 'Check-ins per day must be 1, 2, 3 or 4.');
+    return;
+  }
+  props_().setProperty('PER_DAY', String(n));
+  send_(chatId, 'Updated.\n' + describe_(settings_()));
+}
+
+function setTimezone_(tz) {
+  props_().setProperty('TZ', tz);
+  SpreadsheetApp.getActive().setSpreadsheetTimeZone(tz); // so the log's timestamps match
+}
+
+// ---------------------------------------------------------------- settings panel (inline buttons)
+// Callback data: s:<view> to switch view, s:n:<1-4>, s:f:<idx>, s:l:<idx>, s:z:<idx>, s:pause, s:resume
+
+/** Sends (messageId null) or redraws the settings panel. view: main | first | last | tz */
+function showPanel_(chatId, messageId, view) {
+  const s = settings_();
+  const btn = (text, data) => ({ text: text, callback_data: data });
+  const grid = (items, perRow) => {
+    const rows = [];
+    for (let i = 0; i < items.length; i += perRow) rows.push(items.slice(i, i + perRow));
+    return rows;
+  };
+  const back = [btn('« Back', 's:main')];
+  let text, rows;
+  if (view === 'first') {
+    text = 'First check-in of the day:';
+    rows = grid(FIRST_CHOICES.map((t, i) => btn((t === s.first ? '✓ ' : '') + t, 's:f:' + i)), 4).concat([back]);
+  } else if (view === 'last') {
+    text = 'Last check-in of the day:';
+    rows = grid(LAST_CHOICES.map((t, i) => btn((t === s.last ? '✓ ' : '') + t, 's:l:' + i)), 4).concat([back]);
+  } else if (view === 'tz') {
+    text = 'Your timezone (now ' + s.tz + '):\nNot listed? Type /timezone Area/City, e.g. /timezone Asia/Tokyo';
+    rows = grid(TZ_CHOICES.map((z, i) => btn((z[1] === s.tz ? '✓ ' : '') + z[0], 's:z:' + i)), 2).concat([back]);
+  } else {
+    text = '⚙️ ' + describe_(s) + '\n\nCheck-ins per day:';
+    rows = [
+      [1, 2, 3, 4].map(n => btn((n === s.perDay ? '✓ ' : '') + n, 's:n:' + n)),
+      [btn('🌅 First: ' + s.first, 's:first'), btn('🌙 Last: ' + s.last, 's:last')],
+      [btn('🌍 Timezone', 's:tz'), s.active ? btn('⏸ Pause', 's:pause') : btn('▶️ Resume', 's:resume')],
+    ];
+  }
+  const params = { chat_id: chatId, text: text, reply_markup: { inline_keyboard: rows } };
+  if (messageId) {
+    params.message_id = messageId;
+    tg_('editMessageText', params);
+  } else {
+    tg_('sendMessage', params);
+  }
+}
+
+function handleSettings_(q) {
+  const chatId = String(q.message.chat.id);
+  if (chatId !== props_().getProperty('CHAT_ID')) return;
+  const p = props_();
+  const parts = String(q.data).split(':');
+  const action = parts[1], idx = Number(parts[2]);
+  let view = 'main', toast = 'Saved';
+  if (action === 'n' && idx >= 1 && idx <= 4) p.setProperty('PER_DAY', String(idx));
+  else if (action === 'f' && FIRST_CHOICES[idx]) p.setProperty('FIRST', FIRST_CHOICES[idx]);
+  else if (action === 'l' && LAST_CHOICES[idx]) p.setProperty('LAST', LAST_CHOICES[idx]);
+  else if (action === 'z' && TZ_CHOICES[idx]) setTimezone_(TZ_CHOICES[idx][1]);
+  else if (action === 'pause') { p.setProperty('ACTIVE', 'false'); toast = 'Paused'; }
+  else if (action === 'resume') { p.setProperty('ACTIVE', 'true'); toast = 'Resumed'; }
+  else { view = action; toast = ''; } // just switching view
+  tg_('answerCallbackQuery', { callback_query_id: q.id, text: toast });
+  showPanel_(chatId, q.message.message_id, view);
 }
 
 function handleAnswer_(q) {
